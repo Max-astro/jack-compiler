@@ -1,13 +1,12 @@
 use clap::{App, Arg};
-mod backend;
+
 mod defines;
 mod lexer;
 mod parser;
-use backend::*;
-use defines::*;
+
 use lexer::*;
 use parser::*;
-use std::{env, fs};
+use std::fs;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new("MyProgram")

@@ -16,14 +16,8 @@ macro_rules! hashmap {
 pub enum TokenType {
     // Helper
     Eof,
-    Ignored,
+    // Ignored,
     None,
-    // // obsolete
-    // VarPrefix,
-    // String,
-    // Name,
-    // Print,
-    // Keywords
     Class,
     Constructor,
     Function,
@@ -123,7 +117,7 @@ impl fmt::Display for Token {
             | TokenType::If
             | TokenType::Else
             | TokenType::While
-            | TokenType::Return => write!(f, "<keyword> {} </keyword>\n", self.2.clone().unwrap()),
+            | TokenType::Return => writeln!(f, "<keyword> {} </keyword>", self.2.clone().unwrap()),
 
             TokenType::LeftBrace
             | TokenType::RightBrace
@@ -143,25 +137,21 @@ impl fmt::Display for Token {
             | TokenType::Gt
             | TokenType::Lt
             | TokenType::Equal
-            | TokenType::Not => write!(f, "<symbol> {} </symbol>\n", self.2.clone().unwrap()),
+            | TokenType::Not => writeln!(f, "<symbol> {} </symbol>", self.2.clone().unwrap()),
 
             TokenType::Identifier => {
-                write!(
-                    f,
-                    "<identifier> {} </identifier>\n",
-                    self.2.clone().unwrap()
-                )
+                writeln!(f, "<identifier> {} </identifier>", self.2.clone().unwrap())
             }
 
-            TokenType::IntegerConstant => write!(
+            TokenType::IntegerConstant => writeln!(
                 f,
-                "<integerConstant> {} </integerConstant>\n",
+                "<integerConstant> {} </integerConstant>",
                 self.2.clone().unwrap()
             ),
 
-            TokenType::StringConstant => write!(
+            TokenType::StringConstant => writeln!(
                 f,
-                "<stringConstant> {} </stringConstant>\n",
+                "<stringConstant> {} </stringConstant>",
                 self.2.clone().unwrap()
             ),
             _ => write!(f, ""),

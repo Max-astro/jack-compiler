@@ -1,6 +1,5 @@
 use crate::defines::{keywords_map_init, Token, TokenType};
 use std::collections::HashMap;
-use std::fmt;
 
 pub struct Lexer {
     source: Vec<String>,
@@ -17,7 +16,7 @@ impl Lexer {
             source: source
                 .split('\n')
                 .map(|s| {
-                    if s.chars().nth(0) == Some('/')
+                    if s.chars().next() == Some('/')
                         && (s.chars().nth(1) == Some('/') || s.chars().nth(1) == Some('*'))
                     {
                         return "".to_string();
@@ -152,10 +151,10 @@ impl Lexer {
             '/' => {
                 let (isdivide, i) = self.erase_comment(&self.source[self.line], self.ptr);
                 if isdivide {
-                    return Token(TokenType::Divide, self.line, Some("/".to_string()));
+                    Token(TokenType::Divide, self.line, Some("/".to_string()))
                 } else {
                     self.ptr += i + 1;
-                    return self.get_next_token();
+                    self.get_next_token()
                 }
             }
 

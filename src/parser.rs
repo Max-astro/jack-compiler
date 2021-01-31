@@ -97,7 +97,7 @@ pub struct Parser {
 impl Parser {
     pub fn new(lex: Lexer) -> Self {
         Parser {
-            lex: lex,
+            lex,
             class_names: HashSet::new(),
             variables: HashSet::new(),
             subroutines: HashSet::new(),
@@ -288,8 +288,6 @@ impl Parser {
 
     /// subroutineCall: (subroutineName | (className | varName)) '(' expressionList ')'
     fn parse_subroutine_call(&mut self, name_tok: Token) {
-        let name = name_tok.2.clone().unwrap();
-
         if self.lex.lookahead().0 == TokenType::LeftBracket {
             // if self.subroutines.contains(&name) {
             // parse subroutineName
@@ -511,7 +509,7 @@ impl Parser {
         // parse (op term)*
         while is_operator(&self.lex.lookahead()) {
             pushtok!(self, self.lex.get_next_token());
-            println!("\nparse_expression while: {:?}\n", self.lex.lookahead());
+            //println!("\nparse_expression while: {:?}\n", self.lex.lookahead());
             self.parse_term();
         }
 

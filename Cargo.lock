@@ -90,6 +90,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jack-compiler-rs"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -106,13 +113,6 @@ name = "os_str_bytes"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afb2e1c3ee07430c2cf76151675e583e0f19985fa6efae47d6848a3e2c824f85"
-
-[[package]]
-name = "pineapple"
-version = "0.1.0"
-dependencies = [
- "clap",
-]
 
 [[package]]
 name = "proc-macro-error"

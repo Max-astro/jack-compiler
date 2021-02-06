@@ -18,6 +18,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .about("print source codes"),
         )
         .arg(
+            Arg::new("dir")
+                .short('d')
+                .about("compile all .jack files under input direction"),
+        )
+        .arg(
             Arg::new("INPUT")
                 .about("input jack source code")
                 .required(true)
@@ -40,19 +45,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     if let Some(file) = matches.value_of("INPUT") {
-        let source = fs::read_to_string(file)?;
-        let mut lex = Lexer::new(source);
+        if matches.is_present("dir") {
+            let paths = fs::read_dir(file)?;
+            for file in paths.into_iter().filter_map(Result::ok).filter_map(|d| {
+                d.path()
+                    .to_str()
+                    .and_then(|f| if f.ends_with(".jack") { Some(d) } else { None })
+            }) {
+                let source = fs::read_to_string(file.path())?;
+                let out = file.path().to_str().unwrap().replace(".jack", ".ast.xml");
+                println!("Compiled {:?} to {}", file.path(), out);
 
-        if matches.is_present('p') {
-            lex.print_source();
-        }
+                let lex = Lexer::new(source);
+                let mut parser = Parser::new(lex);
+                parser.output_ast(out)?;
+            }
+        } else {
+            let source = fs::read_to_string(file)?;
+            let mut lex = Lexer::new(source);
 
-        if let Some(token_xml) = matches.value_of("token") {
-            lex.output_tokens(token_xml.to_string())?;
-        }
-        if let Some(ast_xml) = matches.value_of("ast") {
-            let mut parser = Parser::new(lex);
-            parser.output_ast(ast_xml.to_string())?;
+            if matches.is_present("print_source") {
+                lex.print_source();
+            }
+
+            if let Some(token_xml) = matches.value_of("token") {
+                lex.output_tokens(token_xml.to_string())?;
+            }
+            if let Some(ast_xml) = matches.value_of("ast") {
+                let mut parser = Parser::new(lex);
+                parser.output_ast(ast_xml.to_string())?;
+            }
         }
     }
 

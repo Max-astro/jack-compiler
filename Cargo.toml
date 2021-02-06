@@ -1,5 +1,5 @@
 [package]
-name = "pineapple"
+name = "jack-compiler-rs"
 version = "0.1.0"
 authors = ["zhouzebang <zhouzebang@tanteq.com>"]
 edition = "2018"

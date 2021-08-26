@@ -3,10 +3,14 @@ use clap::{App, Arg};
 mod defines;
 mod lexer;
 mod parser;
+mod symbel;
+mod vmwriter;
 
 use lexer::*;
 use parser::*;
 use std::fs;
+use symbel::*;
+use vmwriter::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new("MyProgram")

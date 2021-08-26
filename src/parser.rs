@@ -1,6 +1,7 @@
 // use crate::backend::Statement;
 use crate::defines::*;
 use crate::lexer::*;
+use crate::symbel::*;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -88,8 +89,7 @@ fn is_unary_op(tok: &Token) -> bool {
 
 pub struct Parser {
     lex: Lexer,
-    class_names: HashSet<String>,
-    variables: HashSet<String>,
+    tables: SymbelTable,
     subroutines: HashSet<String>,
     ast: Vec<String>,
 }
@@ -98,8 +98,7 @@ impl Parser {
     pub fn new(lex: Lexer) -> Self {
         Parser {
             lex,
-            class_names: HashSet::new(),
-            variables: HashSet::new(),
+            tables: SymbelTable::new(),
             subroutines: HashSet::new(),
             ast: Vec::new(),
         }
@@ -111,26 +110,9 @@ impl Parser {
         std::fs::write(file, ast)
     }
 
-    fn add_class(&mut self, tok: &Token) {
-        if let Some(class_name) = tok.2.clone() {
-            if !self.class_names.insert(class_name.clone()) {
-                panic!(
-                    "add_class(): Class Name: `{}` aleady exist. token: `{:?}`\n",
-                    class_name, tok
-                )
-            }
-        }
-    }
-
-    fn add_var(&mut self, tok: &Token) {
-        if let Some(var_name) = tok.2.clone() {
-            if !self.variables.insert(var_name.clone()) {
-                panic!(
-                    "add_var(): Variable Name: `{}` aleady exist. token: `{:?}`\n",
-                    var_name, tok
-                )
-            }
-        }
+    fn add_var(&mut self, name: &String, vtype: &String, kind: &Kind) {
+        self.tables
+            .define(name.clone(), vtype.clone(), kind.clone());
     }
 
     fn add_subroutine(&mut self, tok: &Token) {
@@ -150,10 +132,17 @@ impl Parser {
             Token(TokenType::Char, _, _) => true,
             Token(TokenType::Boolean, _, _) => true,
             Token(TokenType::Identifier, _, _) => true,
-            // Token(TokenType::Identifier, _, Some(class_name)) => {
-            //     self.class_names.contains(class_name)
-            // }
             _ => false,
+        }
+    }
+
+    fn get_type(&self, tok: &Token) -> String {
+        match tok {
+            Token(TokenType::Int, _, _) => "int".to_string(),
+            Token(TokenType::Char, _, _) => "char".to_string(),
+            Token(TokenType::Boolean, _, _) => "bool".to_string(),
+            Token(TokenType::Identifier, _, Some(class_name)) => class_name.clone(),
+            _ => panic!("get_type: token {:?} not a type", tok),
         }
     }
 
@@ -173,14 +162,14 @@ impl Parser {
         //parse 'class' className
         pushtok!(self, self.lex.next_token_is(TokenType::Class));
         let class_name_tok = self.lex.next_token_is(TokenType::Identifier);
-        self.add_class(&class_name_tok);
+        let type_name = class_name_tok.2.clone().unwrap();
         pushtok!(self, class_name_tok);
 
         pushtok!(self, self.lex.next_token_is(TokenType::LeftBrace));
         // parse classvarDec*
         let mut next_tok = self.lex.lookahead();
         while next_tok.0 == TokenType::Static || next_tok.0 == TokenType::Field {
-            self.parse_class_vardec();
+            self.parse_class_vardec(&type_name);
             next_tok = self.lex.lookahead();
         }
         // parse subroutineDec*
@@ -197,36 +186,55 @@ impl Parser {
     }
 
     /// classVarDec: ('static' | 'field') type varName (',' varName)* ';'
-    fn parse_class_vardec(&mut self) {
+    fn parse_class_vardec(&mut self, type_name: &String) {
         self.ast.push("<classVarDec>\n".to_string());
         // parse ('static' | 'field')
         let tok = self.lex.get_next_token();
-        if tok.0 == TokenType::Static || tok.0 == TokenType::Field {
-            pushtok!(self, tok);
-        } else {
-            panic!(
-                "parse_class_vardec() error in {}, token:`{:?}` is not 'static' or 'field'\n",
-                tok.1, tok
-            )
-        }
+        let kind = match tok.0 {
+            TokenType::Static => Kind::Static,
+            TokenType::Field => Kind::Field,
+            _ => panic!("parse_class_vardec: {:?} not static or field", tok),
+        };
+
+        // if tok.0 == TokenType::Static || tok.0 == TokenType::Field {
+        //     pushtok!(self, tok);
+        // } else {
+        //     panic!(
+        //         "parse_class_vardec() error in {}, token:`{:?}` is not 'static' or 'field'\n",
+        //         tok.1, tok
+        //     )
+        // }
 
         // parse type varName
         let tok = self.lex.get_next_token();
-        if self.is_type(&tok) {
-            pushtok!(self, tok);
-            pushtok!(self, self.lex.next_token_is(TokenType::Identifier));
-        } else {
-            panic!(
-                "parse_class_vardec() error in {}, token:`{:?}` is not a type\n",
-                tok.1, tok
-            )
-        }
+        let vtype = self.get_type(&tok);
+
+        let var_tok = self.lex.next_token_is(TokenType::Identifier);
+        let name = var_tok.2.unwrap();
+        // add var into scope
+        self.add_var(&name, &vtype, &kind);
+
+        // if self.is_type(&tok) {
+        //     pushtok!(self, tok);
+        //     pushtok!(self, self.lex.next_token_is(TokenType::Identifier));
+        // } else {
+        //     panic!(
+        //         "parse_class_vardec() error in {}, token:`{:?}` is not a type\n",
+        //         tok.1, tok
+        //     )
+        // }
 
         // parse (',' varName)* ';'
         let mut next_tok = self.lex.lookahead();
         while next_tok.0 == TokenType::Comma {
             pushtok!(self, self.lex.next_token_is(TokenType::Comma));
-            pushtok!(self, self.lex.next_token_is(TokenType::Identifier));
+            // pushtok!(self, self.lex.next_token_is(TokenType::Identifier));
+
+            let var_tok = self.lex.next_token_is(TokenType::Identifier);
+            let name = var_tok.2.unwrap();
+            // add var into scope
+            self.add_var(&name, &vtype, &kind);
+
             next_tok = self.lex.lookahead();
         }
         pushtok!(self, self.lex.next_token_is(TokenType::Semicolon));
@@ -342,6 +350,7 @@ impl Parser {
         self.ast.push("</parameterList>\n".to_string());
     }
 
+    /// varDec: 'var' type varName (',' varName)* ';'
     fn parse_var_dec(&mut self) {
         self.ast.push("<varDec>\n".to_string());
 
@@ -350,6 +359,7 @@ impl Parser {
 
         // parse type: keywords | class name
         let tok = self.lex.get_next_token();
+        let vtype = tok.2.clone().unwrap();
         if self.is_type(&tok) {
             pushtok!(self, tok);
         } else {
@@ -359,7 +369,8 @@ impl Parser {
         // parse varName
         let varname_tok = self.lex.next_token_is(TokenType::Identifier);
         // add new declared variable into variables_set
-        self.add_var(&varname_tok);
+        let name = varname_tok.2.clone().unwrap();
+        self.add_var(&name, &vtype, &Kind::Var);
         pushtok!(self, varname_tok);
 
         // parse multiple varName (identifiers)
@@ -367,7 +378,8 @@ impl Parser {
             pushtok!(self, self.lex.next_token_is(TokenType::Comma));
             // add new declared variable into variables_set
             let varname_tok = self.lex.next_token_is(TokenType::Identifier);
-            self.add_var(&varname_tok);
+            let name = varname_tok.2.clone().unwrap();
+            self.add_var(&name, &vtype, &Kind::Var);
             pushtok!(self, varname_tok);
         }
 
@@ -547,9 +559,7 @@ impl Parser {
 
         match tok.0 {
             // parse integerConstant | stringConstant
-            TokenType::IntegerConstant | TokenType::StringConstant => {
-                pushtok!(self, tok)
-            }
+            TokenType::IntegerConstant | TokenType::StringConstant => pushtok!(self, tok),
             // parse subroutineCall | varName | varName '[' expression ']'
             TokenType::Identifier => {
                 let next_tok = self.lex.lookahead();

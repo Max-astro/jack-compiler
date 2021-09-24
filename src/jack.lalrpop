@@ -1,0 +1,196 @@
+use crate::ast::*;
+use crate::defines::TokenType;
+
+grammar;
+
+OneOrMore<T>: Vec<T> = {
+    <i1: T> <i2:("," T)*> => {
+        let mut items = vec![i1];
+        items.extend(i2.into_iter().map(|e| e.1));
+        items
+    }
+};
+
+NoneOrMore<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};
+
+
+// -------------Expression--------------
+pub Expr: Box<Expr> = {
+    // <left:Term> <op:BinOp> <right:Term> => Box::new(Expr::Binary{op, left, right}),
+    // Term,
+
+    <left:Term> <mut op_terms:OpTerms*> => {
+        // if let Some((op, rhs)) = op_terms.pop() {
+        //     let mut top_expr = rhs;
+        //     let mut top_op = op;
+        //     while let Some((next_op, lhs)) = op_terms.pop() {
+        //         top_expr = Box::new(Expr::Binary{op: top_op, left: lhs, right: top_expr});
+        //         top_op = next_op;
+        //     }
+        //     Box::new(Expr::Binary{op: top_op, left, right: top_expr})
+        // } else {
+        //     left
+        // }
+        let mut top_expr = left;
+        for (op, right) in op_terms {
+            top_expr = Box::new(Expr::Binary{op, left: top_expr, right});
+        }
+        top_expr
+    },
+};
+
+pub OpTerms: (TokenType, Box<Expr>) = {
+    <BinOp> <Term> => (<>)
+};
+
+pub Term: Box<Expr> = {
+    IntegerConst => Box::new(Expr::IntConst(<>)),
+    StringConst => Box::new(Expr::StringConst(<>)),
+    KwConst => Box::new(Expr::KwConst(<>)),
+    VarIdent => Box::new(Expr::VarName(<>)),
+    <name:VarIdent> "[" <expr:Expr> "]" => Box::new(Expr::ArrElem(name, expr)),
+    SubroutineCall,
+    "(" <Expr> ")" ,
+    <op:UnaryOp> <expr:Term> => Box::new(Expr::Unary{op, expr}),
+};
+
+pub SubroutineCall: Box<Expr> = {
+    <routine_name:VarIdent> "(" <args:ExprList> ")" => Box::new(Expr::SubroutineCall{class_type:None, obj_name:None, routine_name, args}),
+    <ty:ClassType> "." <routine_name:VarIdent> "(" <args:ExprList> ")" => Box::new(Expr::SubroutineCall{class_type:Some(ty), obj_name:None, routine_name, args}),
+    <obj:VarIdent> "." <routine_name:VarIdent> "(" <args:ExprList> ")" => Box::new(Expr::SubroutineCall{class_type:None, obj_name:Some(obj), routine_name, args}),
+};
+
+pub ExprList = NoneOrMore<Expr>;
+
+// ------------------------------------
+
+
+// // -------------Statement--------------
+pub Statements: Vec<Box<Stmt>> = {
+    <Statement*>
+};
+
+pub Statement: Box<Stmt> = {
+    LetStatement,
+    IfStatement,
+    WhileStatement,
+    DoStatement,
+    ReturnStatement,
+};
+
+pub LetStatement: Box<Stmt> = {
+    "let" <name:VarIdent> "=" <rhs:Expr> ";" => Box::new(Stmt::LetVar(<>)),
+    "let" <arr_name:VarIdent> "[" <idx_expr:Expr> "]" "=" <rhs:Expr> ";" => Box::new(Stmt::LetArr{<>}),
+};
+
+pub IfStatement: Box<Stmt> = {
+    "if" "(" <cond:Expr> ")" "{" <consequence:Statements> "}" <alternative:("else" "{" Statements "}")?> => {
+        let alternative = alternative.map(|alt| alt.2);
+        Box::new(Stmt::IfStmt{cond, consequence, alternative})
+    }
+};
+
+pub WhileStatement: Box<Stmt> = {
+    "while" "(" <Expr> ")" "{" <Statements> "}" => Box::new(Stmt::WhileStmt(<>))
+};
+
+pub DoStatement: Box<Stmt> = {
+    "do" <SubroutineCall> ";" => Box::new(Stmt::DoStmt(<>))
+};
+
+pub ReturnStatement: Box<Stmt> = {
+    "return" <e:Expr?> ";" => Box::new(Stmt::ReturnStmt(e))
+};
+
+// ------------------------------------
+
+
+// ----------Program Structure---------
+pub VarDecl: VarDecl = {
+    "var" <ty:ClassType> <names:OneOrMore<VarIdent>> ";" => (<>),
+};
+
+pub SubroutineBody: SubroutineBody = {
+    "{" <var_decl:VarDecl*> <stmt:Statements> "}" => SubroutineBody{<>}
+};
+
+SingleVarDecl: (ClassType, String) = {
+    <ClassType> <VarIdent>
+};
+
+pub ParameterList: ParamList = {
+    <NoneOrMore<SingleVarDecl>>
+};
+
+pub SubroutineDecl: SubroutineDec = {
+    <routine_type:SubroutineType> <ret_type:ClassType> <routine_name:VarIdent> "(" <args:ParameterList> ")" <body:SubroutineBody> => SubroutineDec{<>}
+};
+
+pub ClassType: ClassType = {
+    "void"     => ClassType::Void,
+    "int"      => ClassType::Int,
+    "boolean"  => ClassType::Boolean,
+    "char"     => ClassType::Char,
+    ClassIdent => ClassType::Class(<>),
+};
+
+pub ClassVarDecl: ClassVarDec = {
+    <field:IsField> <ty:ClassType> <vars:OneOrMore<VarIdent>> ";" => ClassVarDec{<>}
+};
+
+pub ClassDecl: ClassDec = {
+    "class" <name:ClassIdent> "{" <memb_var:ClassVarDecl*> <subroutines:SubroutineDecl*> "}" => ClassDec{<>}
+};
+// ------------------------------------
+
+// -------------helper------------
+
+pub IsField: bool = {
+    "static" => false,
+    "field"  => true,
+};
+
+pub SubroutineType: RoutineType = {
+    "constructor" => RoutineType::Constructor,
+    "function"    => RoutineType::Function,
+    "method"      => RoutineType::Method,
+};
+
+pub BinOp: TokenType = {
+    "+" => TokenType::Plus,
+    "-" => TokenType::Minus,
+    "*" => TokenType::Multi,
+    "/" => TokenType::Divide,
+    "&" => TokenType::And,
+    "|" => TokenType::Or,
+    "<" => TokenType::Gt,
+    ">" => TokenType::Lt,
+    "=" => TokenType::Equal,
+};
+
+pub UnaryOp: TokenType = {
+    "-" => TokenType::Minus,
+    "~" => TokenType::Not,
+};
+
+pub KwConst: TokenType = {
+    "ture"  => TokenType::True,
+    "false" => TokenType::False,
+    "null"  => TokenType::Null,
+    "this"  => TokenType::This,
+};
+
+
+IntegerConst: i32 = <s:r"[0-9]+"> => s.parse::<i32>().unwrap();
+pub StringConst: String = <s:r#"".*""#> => String::from(s);
+
+ClassIdent: String = <s:r"[A-Z][0-9A-Za-z_]*"> => String::from(s);
+VarIdent: String = <s:r"[a-z_][0-9A-Za-z_]*"> => String::from(s);

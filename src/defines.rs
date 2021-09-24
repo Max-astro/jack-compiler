@@ -19,9 +19,11 @@ pub enum TokenType {
     // Ignored,
     None,
     Class,
+    // Subroutine type
     Constructor,
     Function,
     Method,
+    //
     Field,
     Static,
     Var,

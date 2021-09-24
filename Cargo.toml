@@ -1,5 +1,5 @@
 [package]
-name = "jack-compiler-rs"
+name = "jack_compiler"
 version = "0.1.0"
 authors = ["zhouzebang <zhouzebang@tanteq.com>"]
 edition = "2018"
@@ -8,3 +8,11 @@ edition = "2018"
 
 [dependencies]
 clap = "3.0.0-beta.2"
+lalrpop-util = "0.19.6"
+regex = "1"
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm12-0"] }
+
+
+# Add a build-time dependency on the lalrpop library:
+[build-dependencies]
+lalrpop = "0.19.6"

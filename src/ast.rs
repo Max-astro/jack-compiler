@@ -58,7 +58,7 @@ pub enum RoutineType {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ClassType {
     Void,
     Int,

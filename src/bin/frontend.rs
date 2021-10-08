@@ -13,7 +13,7 @@ mod tests {
     #[test]
     fn test_ClassDec() {
         let mut file =
-            File::open("/home/max/proj/jack_compiler/jack_codes/10/ArrayTest/Main.jack").unwrap();
+            File::open("./jack_codes/10/ArrayTest/Main.jack").unwrap();
         let mut contents = String::new();
         let _ = file.read_to_string(&mut contents);
 

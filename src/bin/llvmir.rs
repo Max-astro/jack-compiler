@@ -1,12 +1,15 @@
 extern crate inkwell;
 
 use std::collections::HashMap;
+use std::panic;
 
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassManager;
-use inkwell::types::{AnyTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
+use inkwell::types::{
+    AnyTypeEnum, BasicType, BasicTypeEnum, FunctionType, PointerType, StructType,
+};
 use inkwell::values::{
     AnyValue, BasicValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue,
 };
@@ -44,13 +47,17 @@ pub struct IRCompiler<'a, 'ctx> {
     pub builder: &'a Builder<'ctx>,
     pub fpm: &'a PassManager<FunctionValue<'ctx>>,
     pub module: &'a Module<'ctx>,
-    pub instance_symbol_tbl: HashMap<String, (ClassType, BasicValueEnum<'ctx>)>,
+    pub class_member_idx: HashMap<String, u32>,
     type_cache: HashMap<String, BasicTypeEnum<'ctx>>,
     curr_fn: Option<FunctionValue<'ctx>>,
+    pub this_ptr: Option<PointerValue<'ctx>>,
+    pub curr_symbel_tbl: HashMap<String, PointerValue<'ctx>>,
+    pub class_name: String,
     // functions: HashMap<String, FunctionValue<'ctx>>,
     // fn_value_opt: Option<FunctionValue<'ctx>>,
 }
 
+// CodGen
 impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
     pub fn new(
         context: &'ctx Context,
@@ -63,9 +70,12 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             builder: builder,
             fpm: pass_manager,
             module: module,
-            instance_symbol_tbl: HashMap::new(),
+            class_member_idx: HashMap::new(),
             type_cache: HashMap::new(),
             curr_fn: None,
+            this_ptr: None,
+            curr_symbel_tbl: HashMap::new(),
+            class_name: String::new(),
         }
     }
 
@@ -145,15 +155,25 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             }
             Expr::StringConst(_) => todo!(),
             Expr::VarName(var_name) => {
-                if let Some(&(_, value)) = self.instance_symbol_tbl.get(&var_name) {
-                    value
-                } else {
-                    panic!("expr_codgen: can not find {} in symbel teble", var_name);
-                }
+                let ptr = self.get_var_ptr(&var_name);
+                self.builder.build_load(ptr, "load_memb_var")
             }
-            Expr::ArrElem(_, _) => todo!(),
+            Expr::ArrElem(var_name, indexing) => {
+                let offset = self.expr_codegen(indexing);
+                let arr_ptr_ptr = self.get_var_ptr(&var_name);
+                // maybe need to cast here (from T* to T**)
+                let arr_ptr = self.builder.build_load(arr_ptr_ptr, "load_arr_ptr");
+                let ptr = unsafe {
+                    self.builder.build_gep(
+                        arr_ptr.into_pointer_value(),
+                        &[offset.into_int_value()],
+                        "arr_elem_gep",
+                    )
+                };
+                self.builder.build_load(ptr, "load_arr_elem")
+            }
             Expr::SubroutineCall {
-                class_type,
+                class_type, // exist if its a static function
                 obj_name,
                 routine_name,
                 args,
@@ -176,24 +196,17 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
 
                     self.subroutine_call(fn_name, args_val.as_slice())
                 } else {
-                    let mut args_val = args
-                        .into_iter()
-                        .map(|expr| self.expr_codegen(expr))
-                        .collect::<Vec<_>>();
-
-                    let obj_name = obj_name.unwrap();
-                    if let Some((class, value)) = self.instance_symbol_tbl.get(&obj_name) {
-                        let class_name = match class {
-                            ClassType::Class(class_name) => class_name,
-                            _ => panic!("Not a class"),
-                        };
-
-                        let fn_name = format!("class_{}_method_{}", class_name, routine_name);
-                        args_val.insert(0, value.clone());
-                        self.subroutine_call(fn_name, args_val.as_slice())
+                    let this_ptr = if let Some(name) = obj_name {
+                        self.get_var_ptr(&name)
                     } else {
-                        panic!("Object {} not found", obj_name);
-                    }
+                        self.this_ptr.unwrap()
+                    };
+                    let mut args_val = vec![this_ptr.as_basic_value_enum()];
+                    args.into_iter()
+                        .for_each(|expr| args_val.push(self.expr_codegen(expr)));
+
+                    let fn_name = format!("class_{}_method_{}", self.class_name, routine_name);
+                    self.subroutine_call(fn_name, args_val.as_slice())
                 }
             }
         }
@@ -219,37 +232,191 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         }
     }
 
-    pub fn stmt_codegen(&mut self, stmt: Vec<Box<Stmt>>) {
-        for s in stmt {
-            match *s {
-                Stmt::LetVar(var_name, expr) => {
-                    todo!();
+    pub fn stmt_codegen(&mut self, stmt: Box<Stmt>) {
+        match *stmt {
+            Stmt::LetVar(var_name, expr) => {
+                let rhs = self.expr_codegen(expr);
+                let ptr = self.get_var_ptr(&var_name);
+                self.builder.build_store(ptr, rhs);
+            }
+            Stmt::LetArr {
+                arr_name,
+                idx_expr,
+                rhs,
+            } => {
+                let rhs = self.expr_codegen(rhs);
+                let offset = self.expr_codegen(idx_expr);
+                let arr_head_ptr = self.get_var_ptr(&arr_name);
+                // maybe need to cast here (from T* to T**)
+                let elem_ptr = self.builder.build_load(arr_head_ptr, "load_arr_ptr");
+                let ptr = unsafe {
+                    self.builder.build_gep(
+                        elem_ptr.into_pointer_value(),
+                        &[offset.into_int_value()],
+                        "arr_elem_gep",
+                    )
+                };
+                self.builder.build_store(ptr, rhs);
+            }
+            Stmt::IfStmt {
+                cond,
+                consequence,
+                alternative,
+            } => {
+                let parent = self.curr_fn.unwrap();
+                let comparison = self.expr_codegen(cond);
+
+                let then_block = self.context.append_basic_block(parent, "consequence");
+                let else_block = self.context.append_basic_block(parent, "alternative");
+                let end_block = self.context.append_basic_block(parent, "end");
+
+                self.builder.build_conditional_branch(
+                    comparison.into_int_value(),
+                    then_block,
+                    else_block,
+                );
+
+                // then block
+                self.builder.position_at_end(then_block);
+                for stmt in consequence {
+                    self.stmt_codegen(stmt);
                 }
-                Stmt::LetArr {
-                    arr_name,
-                    idx_expr,
-                    rhs,
-                } => todo!(),
-                Stmt::IfStmt {
-                    cond,
-                    consequence,
-                    alternative,
-                } => todo!(),
-                Stmt::WhileStmt(_, _) => todo!(),
-                Stmt::DoStmt(_) => todo!(),
-                Stmt::ReturnStmt(_) => todo!(),
-            };
+                self.builder.build_unconditional_branch(end_block);
+
+                // else block
+                if let Some(stmts) = alternative {
+                    self.builder.position_at_end(else_block);
+                    for stmt in stmts {
+                        self.stmt_codegen(stmt);
+                    }
+                    self.builder.build_unconditional_branch(end_block);
+                }
+
+                // merge block
+                self.builder.position_at_end(end_block);
+            }
+            Stmt::WhileStmt(cond, stmts) => {
+                let parent = self.curr_fn.unwrap();
+                // let cond_var = self.create_entry_block_alloca(ty, name)
+                let cond_bb = self.context.append_basic_block(parent, "cond");
+                let loop_bb = self.context.append_basic_block(parent, "loop_body");
+                let end_bb = self.context.append_basic_block(parent, "end");
+
+                self.builder.position_at_end(cond_bb);
+                let comparison = self.expr_codegen(cond);
+                self.builder
+                    .build_conditional_branch(comparison.into_int_value(), loop_bb, end_bb);
+
+                // loop body
+                self.builder.position_at_end(loop_bb);
+                for stmt in stmts {
+                    self.stmt_codegen(stmt);
+                }
+                self.builder.build_unconditional_branch(loop_bb);
+                self.builder.position_at_end(end_bb);
+            }
+            Stmt::DoStmt(expr) => {
+                match expr.as_ref() {
+                    Expr::SubroutineCall {
+                        class_type: _,
+                        obj_name: _,
+                        routine_name: _,
+                        args: _,
+                    } => {}
+                    _ => panic!("Not a functional call in Do statement"),
+                };
+                self.expr_codegen(expr);
+            }
+            Stmt::ReturnStmt(ret) => {
+                if let Some(expr) = ret {
+                    let ret = self.expr_codegen(expr);
+                    self.builder.build_return(Some(&ret));
+                } else {
+                    self.builder.build_return(None);
+                }
+            }
+        };
+    }
+
+    fn subroutine_codegen(
+        &mut self,
+        this_type: StructType<'ctx>,
+        subroutine: SubroutineDec,
+    ) -> FunctionValue<'ctx> {
+        let fn_val = match subroutine.routine_type {
+            RoutineType::Function => self.create_subroutine_fn_type(None, &subroutine),
+            _ => self.create_subroutine_fn_type(Some(this_type), &subroutine),
+            // RoutineType::Constructor => todo!(),
+            // RoutineType::Method => todo!(),
+        };
+        let entry = self
+            .context
+            .append_basic_block(fn_val, &subroutine.routine_name);
+        self.builder.position_at_end(entry);
+
+        self.curr_fn = Some(fn_val);
+
+        // build arg variables ptr into symbel table
+        for (idx, arg) in fn_val.get_param_iter().enumerate() {
+            let (class_ty, arg_name) = &subroutine.args[idx];
+            let ty = self.convert_type(class_ty);
+            if self.curr_symbel_tbl.contains_key(arg_name) {
+                panic!("subroutine_codegen: variable {} alreadly exist.", arg_name);
+            }
+            let alloca =
+                self.create_entry_block_alloca(ty.ptr_type(AddressSpace::Generic), arg_name);
+            self.builder.build_store(alloca, arg);
+            self.curr_symbel_tbl.insert(arg_name.clone(), alloca);
+        }
+
+        // process subroutine local variables
+        for (class_ty, names) in subroutine.body.var_decl.iter() {
+            let ty = self.convert_type(class_ty).ptr_type(AddressSpace::Generic);
+            for name in names {
+                if self.curr_symbel_tbl.contains_key(name) {
+                    panic!("subroutine_codegen: variable {} alreadly exist.", name);
+                }
+                let alloca = self.create_entry_block_alloca(ty, name);
+                self.curr_symbel_tbl.insert(name.clone(), alloca);
+            }
+        }
+
+        for s in subroutine.body.stmt {
+            self.stmt_codegen(s);
+        }
+
+        // pop out arg variables ptr in symbel table
+        for (_, arg_name) in &subroutine.args {
+            self.curr_symbel_tbl.remove(arg_name);
+        }
+
+        // pop out subroutine local variables
+        for (_, names) in subroutine.body.var_decl.iter() {
+            for local_var_name in names {
+                self.curr_symbel_tbl.remove(local_var_name);
+            }
+        }
+
+        fn_val
+    }
+
+    fn class_decl(&mut self, decl: ClassDec) {
+        let ClassDec {
+            name,
+            memb_var,
+            subroutines,
+        } = decl;
+
+        self.class_name = name.clone();
+        let this_class_type = self.create_new_class(name, &memb_var);
+        for routine in subroutines {
+            self.subroutine_codegen(this_class_type, routine);
         }
     }
+}
 
-    fn let_stmt_codegen(&mut self, stmt: Box<Stmt>) {}
-    fn if_stmt_codegen(&mut self, function: FunctionValue<'ctx>, stmt: Box<Stmt>) {}
-    fn while_stmt_codegen(&mut self, function: FunctionValue<'ctx>, stmt: Box<Stmt>) {
-        let mut cond_bb = self.context.append_basic_block(function, "while_cond");
-    }
-    fn do_stmt_codegen(&mut self, function: FunctionValue<'ctx>, stmt: Box<Stmt>) {}
-    fn return_stmt_codegen(&mut self, function: FunctionValue<'ctx>, stmt: Box<Stmt>) {}
-
+// Helper functions
+impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
     fn convert_type(&self, class_ty: &ClassType) -> BasicTypeEnum<'ctx> {
         match *class_ty {
             ClassType::Boolean => self.context.bool_type().into(),
@@ -266,108 +433,20 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         }
     }
 
-    fn create_new_class(&mut self, name: String, members: &ParamList) {
-        if let Some(exist) = self.type_cache.get(&name) {
-            panic!("{} alreadly exist. {:?}", name, exist);
+    fn create_subroutine_fn_type(
+        &mut self,
+        this_type: Option<StructType<'ctx>>,
+        subroutine: &SubroutineDec,
+    ) -> FunctionValue<'ctx> {
+        let mut args_ty = vec![];
+        if let Some(this) = this_type {
+            // is member funcion, the first arg will always be 'this' ptr
+            args_ty.push(this.ptr_type(AddressSpace::Generic).as_basic_type_enum());
         }
-
-        let mems_ty = members
-            .iter()
-            .map(|(ty, _)| self.convert_type(ty))
-            .collect::<Vec<_>>();
-        let new_type = self.context.struct_type(&mems_ty, false);
-        self.type_cache.insert(name, new_type.as_basic_type_enum());
-    }
-
-    fn subroutine_codegen(&mut self, mut subroutine: SubroutineDec) -> FunctionValue<'ctx> {
-        let fn_val = self.create_subroutine_fn_type(&subroutine);
-        let entry = self
-            .context
-            .append_basic_block(fn_val, &subroutine.routine_name);
-        self.builder.position_at_end(entry);
-
-        self.curr_fn = Some(fn_val);
-
-        // build variables map
-        // process subroutine args
-        for (idx, arg) in fn_val.get_param_iter().enumerate() {
-            let (class_ty, name) = &subroutine.args[idx];
-            let ty = self.convert_type(class_ty);
-            if self.instance_symbol_tbl.contains_key(name) {
-                panic!("subroutine_codegen: variable {} alreadly exist.", name);
-            }
-            let alloca = self.create_entry_block_alloca(ty, name);
-            self.builder.build_store(alloca, arg);
-            self.instance_symbol_tbl.insert(
-                name.clone(),
-                (class_ty.clone(), alloca.as_basic_value_enum()),
-            );
-        }
-
-        // process subroutine local variables
-        for (class_ty, names) in subroutine.body.var_decl.iter() {
-            let ty = self.convert_type(class_ty);
-            for name in names {
-                if self.instance_symbol_tbl.contains_key(name) {
-                    panic!("subroutine_codegen: variable {} alreadly exist.", name);
-                }
-                let alloca = self.create_entry_block_alloca(ty, name);
-                self.instance_symbol_tbl.insert(
-                    name.clone(),
-                    (class_ty.clone(), alloca.as_basic_value_enum()),
-                );
-            }
-        }
-
-        for s in subroutine.body.stmt {
-            match *s {
-                Stmt::LetVar(_, _) => todo!(),
-                Stmt::LetArr {
-                    arr_name,
-                    idx_expr,
-                    rhs,
-                } => todo!(),
-                Stmt::IfStmt {
-                    cond,
-                    consequence,
-                    alternative,
-                } => todo!(),
-                Stmt::WhileStmt(_, _) => todo!(),
-                Stmt::DoStmt(_) => todo!(),
-                Stmt::ReturnStmt(stmt) => {
-                    if let Some(expr) = stmt {
-                        let ret = self.expr_codegen(expr);
-                        self.builder.build_return(Some(&ret));
-                    } else {
-                        self.builder.build_return(None);
-                    }
-                }
-            }
-        }
-
-        fn_val
-    }
-
-    fn create_entry_block_alloca(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
-        let builder = self.context.create_builder();
-        let entry = self
-            .curr_fn
-            .and_then(|fn_val| fn_val.get_first_basic_block())
-            .unwrap();
-
-        match entry.get_first_instruction() {
-            Some(first_inst) => builder.position_before(&first_inst),
-            None => builder.position_at_end(entry),
-        }
-        builder.build_alloca(ty, name)
-    }
-
-    fn create_subroutine_fn_type(&mut self, subroutine: &SubroutineDec) -> FunctionValue<'ctx> {
-        let args_ty = subroutine
+        subroutine
             .args
             .iter()
-            .map(|(ty, _)| self.convert_type(ty))
-            .collect::<Vec<BasicTypeEnum>>();
+            .for_each(|(ty, _)| args_ty.push(self.convert_type(ty)));
 
         let fn_type = match &subroutine.ret_type {
             ClassType::Void => self.context.void_type().fn_type(args_ty.as_slice(), false),
@@ -382,6 +461,68 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         }
 
         fn_val
+    }
+
+    fn create_new_class(&mut self, name: String, members: &Vec<ClassVarDec>) -> StructType<'ctx> {
+        if let Some(exist) = self.type_cache.get(&name) {
+            panic!("{} alreadly exist. {:?}", name, exist);
+        }
+
+        let mut mems_ty = vec![];
+        let mut idx_cnt = 0;
+        for ClassVarDec { field, ty, vars } in members.iter() {
+            let ty = self.convert_type(ty);
+            if *field {
+                // member variables
+                for var_name in vars {
+                    mems_ty.push(ty);
+                    self.class_member_idx.insert(var_name.clone(), idx_cnt);
+                    idx_cnt += 1;
+                }
+            } else {
+                // TODO: global variable name mangling by its class
+                for var_name in vars {
+                    let glo_var = self
+                        .module
+                        .add_global(ty, Some(AddressSpace::Global), var_name);
+                    self.curr_symbel_tbl
+                        .insert(var_name.clone(), glo_var.as_pointer_value());
+                }
+            }
+        }
+
+        let new_type = self.context.struct_type(&mems_ty, false);
+        self.type_cache.insert(name, new_type.as_basic_type_enum());
+        new_type
+    }
+
+    fn create_entry_block_alloca(&self, ty: PointerType<'ctx>, name: &str) -> PointerValue<'ctx> {
+        let builder = self.context.create_builder();
+        let entry = self
+            .curr_fn
+            .and_then(|fn_val| fn_val.get_first_basic_block())
+            .unwrap();
+
+        match entry.get_first_instruction() {
+            Some(first_inst) => builder.position_before(&first_inst),
+            None => builder.position_at_end(entry),
+        }
+        builder.build_alloca(ty, name)
+    }
+
+    fn get_var_ptr(&mut self, var_name: &String) -> PointerValue<'ctx> {
+        if let Some(&memb_idx) = self.class_member_idx.get(var_name) {
+            let this = self.this_ptr.unwrap();
+            self.builder
+                .build_struct_gep(this, memb_idx, "memb_var_ptr")
+                .unwrap()
+        } else {
+            if let Some(ptr) = self.curr_symbel_tbl.get(var_name) {
+                ptr.clone()
+            } else {
+                panic!("expr_codgen: can not find {} in symbel teble", var_name);
+            }
+        }
     }
 }
 
@@ -464,18 +605,35 @@ fn gep_tmp() {
 
     builder.position_at_end(entry);
 
-    // let i32_ptr = fn_value.get_first_param().unwrap().into_pointer_value();
-    // let struct_ptr = fn_value.get_last_param().unwrap().into_pointer_value();
+    // --------------------------------------------------------------------
 
-    // assert!(builder.build_struct_gep(i32_ptr, 0, "struct_gep").is_err());
-    // assert!(builder.build_struct_gep(i32_ptr, 10, "struct_gep").is_err());
-    // assert!(builder
-    //     .build_struct_gep(struct_ptr, 0, "struct_gep")
-    //     .is_ok());
-    // assert!(builder
-    //     .build_struct_gep(struct_ptr, 1, "struct_gep")
-    //     .is_ok());
-    // assert!(builder
-    //     .build_struct_gep(struct_ptr, 2, "struct_gep")
-    //     .is_err());
+    let context = Context::create();
+    let builder = context.create_builder();
+    let module = context.create_module("struct_gep");
+    let void_type = context.void_type();
+    let i32_ty = context.i32_type();
+    let i32_ptr_ty = i32_ty.ptr_type(AddressSpace::Generic);
+    let field_types = &[i32_ty.into(), i32_ty.into()];
+    let struct_ty = context.struct_type(field_types, false);
+    let struct_ptr_ty = struct_ty.ptr_type(AddressSpace::Generic);
+    let fn_type = void_type.fn_type(&[i32_ptr_ty.into(), struct_ptr_ty.into()], false);
+    let fn_value = module.add_function("", fn_type, None);
+    let entry = context.append_basic_block(fn_value, "entry");
+
+    builder.position_at_end(entry);
+
+    let i32_ptr = fn_value.get_first_param().unwrap().into_pointer_value();
+    let struct_ptr = fn_value.get_last_param().unwrap().into_pointer_value();
+
+    assert!(builder.build_struct_gep(i32_ptr, 0, "struct_gep").is_err());
+    assert!(builder.build_struct_gep(i32_ptr, 10, "struct_gep").is_err());
+    assert!(builder
+        .build_struct_gep(struct_ptr, 0, "struct_gep")
+        .is_ok());
+    assert!(builder
+        .build_struct_gep(struct_ptr, 1, "struct_gep")
+        .is_ok());
+    assert!(builder
+        .build_struct_gep(struct_ptr, 2, "struct_gep")
+        .is_err());
 }

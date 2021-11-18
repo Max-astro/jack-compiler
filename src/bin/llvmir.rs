@@ -397,6 +397,18 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             }
         }
 
+        // pop out arg variables ptr in symbel table
+        for (_, arg_name) in &subroutine.args {
+            self.curr_symbel_tbl.remove(arg_name);
+        }
+
+        // pop out subroutine local variables
+        for (_, names) in subroutine.body.var_decl.iter() {
+            for local_var_name in names {
+                self.curr_symbel_tbl.remove(local_var_name);
+            }
+        }
+
         fn_val
     }
 

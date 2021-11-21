@@ -7,28 +7,24 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassManager;
-use inkwell::types::{
-    AnyTypeEnum, BasicType, BasicTypeEnum, FunctionType, PointerType, StructType,
-};
-use inkwell::values::{
-    AnyValue, BasicValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue,
-};
+use inkwell::types::{BasicType, BasicTypeEnum, PointerType, StructType};
+use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::AddressSpace;
-use inkwell::{IntPredicate, OptimizationLevel};
+use inkwell::IntPredicate;
 
 use jack_compiler::ast::*;
 use jack_compiler::defines::TokenType;
 
-struct ClassTypeDecl<'a, 'ctx> {
-    compiler: IRCompiler<'a, 'ctx>,
-    class_ty: StructType<'ctx>,
-    constructor: Option<FunctionType<'ctx>>,
-    functions: HashMap<String, FunctionType<'ctx>>,
-    methods: HashMap<String, FunctionType<'ctx>>,
-    static_members: HashMap<String, BasicTypeEnum<'ctx>>,
-    field_members: HashMap<String, BasicTypeEnum<'ctx>>,
-    member_offset: HashMap<String, usize>,
-}
+// struct ClassTypeDecl<'a, 'ctx> {
+//     compiler: IRCompiler<'a, 'ctx>,
+//     class_ty: StructType<'ctx>,
+//     constructor: Option<FunctionType<'ctx>>,
+//     functions: HashMap<String, FunctionType<'ctx>>,
+//     methods: HashMap<String, FunctionType<'ctx>>,
+//     static_members: HashMap<String, BasicTypeEnum<'ctx>>,
+//     field_members: HashMap<String, BasicTypeEnum<'ctx>>,
+//     member_offset: HashMap<String, usize>,
+// }
 
 // impl<'a, 'ctx> ClassTypeDecl<'a, 'ctx> {
 //     // pub fn new_class()
@@ -50,14 +46,14 @@ pub struct IRCompiler<'a, 'ctx> {
     pub class_member_idx: HashMap<String, u32>,
     type_cache: HashMap<String, BasicTypeEnum<'ctx>>,
     curr_fn: Option<FunctionValue<'ctx>>,
-    pub this_ptr: Option<PointerValue<'ctx>>,
+    this_ptr: Option<PointerValue<'ctx>>,
     pub curr_symbel_tbl: HashMap<String, PointerValue<'ctx>>,
-    pub class_name: String,
+    pub curr_class_name: String,
     // functions: HashMap<String, FunctionValue<'ctx>>,
     // fn_value_opt: Option<FunctionValue<'ctx>>,
 }
 
-// CodGen
+/* LLVM IR Code Generate */
 impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
     pub fn new(
         context: &'ctx Context,
@@ -75,7 +71,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             curr_fn: None,
             this_ptr: None,
             curr_symbel_tbl: HashMap::new(),
-            class_name: String::new(),
+            curr_class_name: String::new(),
         }
     }
 
@@ -205,30 +201,10 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                     args.into_iter()
                         .for_each(|expr| args_val.push(self.expr_codegen(expr)));
 
-                    let fn_name = format!("class_{}_method_{}", self.class_name, routine_name);
+                    let fn_name = format!("class_{}_method_{}", self.curr_class_name, routine_name);
                     self.subroutine_call(fn_name, args_val.as_slice())
                 }
             }
-        }
-    }
-
-    fn subroutine_call(
-        &mut self,
-        fn_name: String,
-        args: &[BasicValueEnum<'ctx>],
-    ) -> BasicValueEnum<'ctx> {
-        if let Some(fn_val) = self.module.get_function(&fn_name) {
-            match self
-                .builder
-                .build_call(fn_val, args, "fncall")
-                .try_as_basic_value()
-                .left()
-            {
-                Some(value) => value,
-                None => panic!("Invalid call produced."),
-            }
-        } else {
-            panic!("Function {} not been decleared", fn_name);
         }
     }
 
@@ -338,26 +314,54 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         };
     }
 
-    fn subroutine_codegen(
-        &mut self,
-        this_type: StructType<'ctx>,
-        subroutine: SubroutineDec,
-    ) -> FunctionValue<'ctx> {
-        let fn_val = match subroutine.routine_type {
-            RoutineType::Function => self.create_subroutine_fn_type(None, &subroutine),
-            _ => self.create_subroutine_fn_type(Some(this_type), &subroutine),
-            // RoutineType::Constructor => todo!(),
-            // RoutineType::Method => todo!(),
+    fn subroutine_codegen(&mut self, subroutine: SubroutineDec) -> FunctionValue<'ctx> {
+        let (fn_name, is_fn) = match subroutine.routine_type {
+            RoutineType::Function => (
+                format!(
+                    "class_{}_fn_{}",
+                    self.curr_class_name.as_str(),
+                    subroutine.routine_name
+                ),
+                true,
+            ),
+            _ => (
+                format!(
+                    "class_{}_method_{}",
+                    self.curr_class_name.as_str(),
+                    subroutine.routine_name
+                ),
+                false,
+            ),
         };
+
+        let fn_val = self
+            .module
+            .get_function(&fn_name)
+            .unwrap_or_else(|| panic!("subroutine_codegen: Function {} doesn't exist", fn_name));
+        self.curr_fn = Some(fn_val);
+
         let entry = self
             .context
             .append_basic_block(fn_val, &subroutine.routine_name);
         self.builder.position_at_end(entry);
 
-        self.curr_fn = Some(fn_val);
-
+        // // TODO: fix the first arg (this ptr) in the arg list.
         // build arg variables ptr into symbel table
-        for (idx, arg) in fn_val.get_param_iter().enumerate() {
+        let mut arg_iter = fn_val.get_param_iter();
+        if is_fn {
+            self.this_ptr = None;
+        } else {
+            // member function's first arg is 'this' ptr
+            let this_val = arg_iter.next().unwrap();
+            let this_ty = this_val.get_type();
+            let this_ptr =
+                self.create_entry_block_alloca(this_ty.ptr_type(AddressSpace::Generic), "this_ptr");
+            self.builder.build_store(this_ptr, this_val);
+            self.curr_symbel_tbl.insert("this".to_string(), this_ptr);
+            self.this_ptr.replace(this_ptr);
+        }
+
+        for (idx, arg) in arg_iter.enumerate() {
             let (class_ty, arg_name) = &subroutine.args[idx];
             let ty = self.convert_type(class_ty);
             if self.curr_symbel_tbl.contains_key(arg_name) {
@@ -397,37 +401,31 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             }
         }
 
-        // pop out arg variables ptr in symbel table
-        for (_, arg_name) in &subroutine.args {
-            self.curr_symbel_tbl.remove(arg_name);
-        }
-
-        // pop out subroutine local variables
-        for (_, names) in subroutine.body.var_decl.iter() {
-            for local_var_name in names {
-                self.curr_symbel_tbl.remove(local_var_name);
-            }
+        if !is_fn {
+            self.curr_symbel_tbl.remove("this");
+            self.this_ptr = None;
+            self.curr_fn = None;
         }
 
         fn_val
     }
 
-    fn class_decl(&mut self, decl: ClassDec) {
+    fn class_decl_codegen(&mut self, decl: ClassDec) {
         let ClassDec {
             name,
             memb_var,
             subroutines,
         } = decl;
 
-        self.class_name = name.clone();
-        let this_class_type = self.create_new_class(name, &memb_var);
+        self.preprocess_class_decl(&name, &memb_var);
         for routine in subroutines {
-            self.subroutine_codegen(this_class_type, routine);
+            self.subroutine_codegen(routine);
         }
+        self.class_member_idx.clear(); // remove member variables idx map because these variables can't be accessd by name directly anymore (only by getter/setter)
     }
 }
 
-// Helper functions
+/* ################################### Helper functions ########################################## */
 impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
     fn convert_type(&self, class_ty: &ClassType) -> BasicTypeEnum<'ctx> {
         match *class_ty {
@@ -450,10 +448,22 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         this_type: Option<StructType<'ctx>>,
         subroutine: &SubroutineDec,
     ) -> FunctionValue<'ctx> {
+        let fn_name;
         let mut args_ty = vec![];
         if let Some(this) = this_type {
             // is member funcion, the first arg will always be 'this' ptr
             args_ty.push(this.ptr_type(AddressSpace::Generic).as_basic_type_enum());
+            fn_name = format!(
+                "class_{}_method_{}",
+                self.curr_class_name.as_str(),
+                subroutine.routine_name
+            );
+        } else {
+            fn_name = format!(
+                "class_{}_fn_{}",
+                self.curr_class_name.as_str(),
+                subroutine.routine_name
+            );
         }
         subroutine
             .args
@@ -464,9 +474,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             ClassType::Void => self.context.void_type().fn_type(args_ty.as_slice(), false),
             ty => self.convert_type(ty).fn_type(args_ty.as_slice(), false),
         };
-        let fn_val = self
-            .module
-            .add_function(subroutine.routine_name.as_str(), fn_type, None);
+        let fn_val = self.module.add_function(fn_name.as_str(), fn_type, None);
         for (idx, arg) in fn_val.get_param_iter().enumerate() {
             let (_, ref name) = subroutine.args[idx];
             arg.set_name(name.as_str());
@@ -481,16 +489,12 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         }
 
         let mut mems_ty = vec![];
-        let mut idx_cnt = 0;
+        // let mut idx_cnt = 0;
         for ClassVarDec { field, ty, vars } in members.iter() {
             let ty = self.convert_type(ty);
             if *field {
                 // member variables
-                for var_name in vars {
-                    mems_ty.push(ty);
-                    self.class_member_idx.insert(var_name.clone(), idx_cnt);
-                    idx_cnt += 1;
-                }
+                vars.iter().for_each(|_| mems_ty.push(ty));
             } else {
                 // TODO: global variable name mangling by its class
                 for var_name in vars {
@@ -522,9 +526,31 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         builder.build_alloca(ty, name)
     }
 
+    fn subroutine_call(
+        &mut self,
+        fn_name: String,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> BasicValueEnum<'ctx> {
+        if let Some(fn_val) = self.module.get_function(&fn_name) {
+            match self
+                .builder
+                .build_call(fn_val, args, "fncall")
+                .try_as_basic_value()
+                .left()
+            {
+                Some(value) => value,
+                None => panic!("Invalid call produced."),
+            }
+        } else {
+            panic!("Function {} not been decleared", fn_name);
+        }
+    }
+
     fn get_var_ptr(&mut self, var_name: &String) -> PointerValue<'ctx> {
         if let Some(&memb_idx) = self.class_member_idx.get(var_name) {
-            let this = self.this_ptr.unwrap();
+            let this = self
+                .this_ptr
+                .unwrap_or_else(|| panic!("derefence 'this' ptr in non member function"));
             self.builder
                 .build_struct_gep(this, memb_idx, "memb_var_ptr")
                 .unwrap()
@@ -536,116 +562,73 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             }
         }
     }
+
+    fn predeclare_classes(&mut self, classes: &Vec<ClassDec>) {
+        for ClassDec {
+            name,
+            memb_var,
+            subroutines,
+        } in classes
+        {
+            // declare class's struct type, static variables, member variables index
+            let cl_ty = self.create_new_class(name.clone(), memb_var);
+
+            // declare static/member functions
+            for subroutine in subroutines {
+                match subroutine.routine_type {
+                    RoutineType::Function => self.create_subroutine_fn_type(None, subroutine),
+                    RoutineType::Method => self.create_subroutine_fn_type(Some(cl_ty), subroutine),
+                    RoutineType::Constructor => {
+                        self.create_subroutine_fn_type(Some(cl_ty), subroutine)
+                    }
+                };
+            }
+        }
+    }
+
+    fn preprocess_class_decl(&mut self, name: &str, memb_var: &Vec<ClassVarDec>) {
+        self.curr_class_name = name.to_string();
+        let mut idx_cnt = 0;
+        for ClassVarDec { field, ty: _, vars } in memb_var.iter() {
+            if *field {
+                // only consider member variables
+                for var_name in vars {
+                    self.class_member_idx.insert(var_name.clone(), idx_cnt);
+                    idx_cnt += 1;
+                }
+            }
+        }
+    }
 }
 
 fn main() {
-    let context = Context::create();
-    let module = context.create_module("jackc");
-    let builder = context.create_builder();
-    let fpm = PassManager::create(&module);
-    // fpm.add_reassociate_pass();
-    fpm.initialize();
-
-    let void_type = context.void_type();
-    let fn_type = void_type.fn_type(&[], false);
-    let function = module.add_function("do_nothing", fn_type, None);
-    let basic_block = context.append_basic_block(function, "entry");
-    println!("{:?}", basic_block);
-    builder.position_at_end(basic_block);
-
-    // ------------
-    let struct_type = create_struct_type(&context);
-    println!("{:?}", struct_type);
-    let struct_ptr = builder.build_alloca(struct_type, "tmp_struct");
-
-    let gep = builder
-        .build_struct_gep(struct_ptr, 1, "float_access")
-        .unwrap();
-    println!("{:?}\n", gep);
-
-    let fval = context.f32_type().const_float(7.0);
-    let stor = builder.build_store(gep, fval);
-    println!("{:?}", stor);
-
-    let val = builder.build_load(struct_ptr, "load_ptr");
-    println!("{:?}", val);
-    // let mut cc = IRCompiler::new(&context, &builder, &fpm, &module);
-}
-
-fn tmp(context: &Context) {
-    let f32_type = context.f32_type();
-    let i32_type = context.i32_type();
-    let i8_type = context.i8_type();
-    let struct_type =
-        context.struct_type(&[i32_type.into(), f32_type.into(), i8_type.into()], false);
-
-    let sz = context.i64_type().const_zero();
-    for val in struct_type.get_field_types() {
-        let i = val.size_of().unwrap();
-        sz.const_add(i);
+    let mut class_decls = vec![];
+    for class_file in std::env::args().skip(1) {
+        class_decls.push(jack_compiler::parse_class_decl(&class_file));
     }
 
-    // println!("{:?}\n {:?}", sz, struct_type.size_of());
-    println!("{}\n", sz.print_to_string().to_string());
+    let context = Context::create();
+    let module = context.create_module("jack");
+    let builder = context.create_builder();
+    let fpm = PassManager::create(&module);
+    // fpm_add_passes(&fpm);    // show not optimized IR for debug
+    fpm.initialize();
 
-    println!(
-        "{}\n",
-        struct_type.size_of().unwrap().print_to_string().to_string()
-    );
+    let mut ir = IRCompiler::new(&context, &builder, &fpm, &module);
+    ir.predeclare_classes(&class_decls);
+    for class in class_decls {
+        ir.class_decl_codegen(class);
+    }
+
+    ir.module.print_to_stderr();
 }
 
-fn create_struct_type(context: &Context) -> StructType {
-    let f32_type = context.f32_type();
-    let i32_type = context.i32_type();
-    let i8_type = context.i8_type();
-    context.struct_type(&[i32_type.into(), f32_type.into(), i8_type.into()], false)
-}
-
-fn gep_tmp() {
-    let context = Context::create();
-    let builder = context.create_builder();
-    let module = context.create_module("struct_gep");
-    let void_type = context.void_type();
-    let i32_ty = context.i32_type();
-    let i32_ptr_ty = i32_ty.ptr_type(AddressSpace::Generic);
-    let field_types = &[i32_ty.into(), i32_ty.into()];
-    let struct_ty = context.struct_type(field_types, false);
-    let struct_ptr_ty = struct_ty.ptr_type(AddressSpace::Generic);
-    let fn_type = void_type.fn_type(&[i32_ptr_ty.into(), struct_ptr_ty.into()], false);
-    let fn_value = module.add_function("", fn_type, None);
-    let entry = context.append_basic_block(fn_value, "entry");
-
-    builder.position_at_end(entry);
-
-    // --------------------------------------------------------------------
-
-    let context = Context::create();
-    let builder = context.create_builder();
-    let module = context.create_module("struct_gep");
-    let void_type = context.void_type();
-    let i32_ty = context.i32_type();
-    let i32_ptr_ty = i32_ty.ptr_type(AddressSpace::Generic);
-    let field_types = &[i32_ty.into(), i32_ty.into()];
-    let struct_ty = context.struct_type(field_types, false);
-    let struct_ptr_ty = struct_ty.ptr_type(AddressSpace::Generic);
-    let fn_type = void_type.fn_type(&[i32_ptr_ty.into(), struct_ptr_ty.into()], false);
-    let fn_value = module.add_function("", fn_type, None);
-    let entry = context.append_basic_block(fn_value, "entry");
-
-    builder.position_at_end(entry);
-
-    let i32_ptr = fn_value.get_first_param().unwrap().into_pointer_value();
-    let struct_ptr = fn_value.get_last_param().unwrap().into_pointer_value();
-
-    assert!(builder.build_struct_gep(i32_ptr, 0, "struct_gep").is_err());
-    assert!(builder.build_struct_gep(i32_ptr, 10, "struct_gep").is_err());
-    assert!(builder
-        .build_struct_gep(struct_ptr, 0, "struct_gep")
-        .is_ok());
-    assert!(builder
-        .build_struct_gep(struct_ptr, 1, "struct_gep")
-        .is_ok());
-    assert!(builder
-        .build_struct_gep(struct_ptr, 2, "struct_gep")
-        .is_err());
+fn fpm_add_passes(fpm: &PassManager<FunctionValue>) {
+    fpm.add_instruction_combining_pass();
+    fpm.add_reassociate_pass();
+    fpm.add_gvn_pass();
+    fpm.add_cfg_simplification_pass();
+    fpm.add_basic_alias_analysis_pass();
+    fpm.add_promote_memory_to_register_pass();
+    fpm.add_reassociate_pass();
 }

@@ -67,6 +67,22 @@ pub fn preprocess(s: String) -> String {
     res
 }
 
+pub fn parse_class_decl(file_name: &str) -> crate::ast::ClassDec {
+    use std::io::prelude::*;
+    let mut file = std::fs::File::open(file_name).unwrap();
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+
+    contents = preprocess(contents);
+
+    println!("{}\n\n", contents);
+
+    match jack::ClassDeclParser::new().parse(contents.as_str()) {
+        Ok(class) => class,
+        Err(e) => panic!("{:?}", e),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CommentState {
     Slash,

@@ -75,8 +75,6 @@ pub fn parse_class_decl(file_name: &str) -> crate::ast::ClassDec {
 
     contents = preprocess(contents);
 
-    println!("{}\n\n", contents);
-
     match jack::ClassDeclParser::new().parse(contents.as_str()) {
         Ok(class) => class,
         Err(e) => panic!("{:?}", e),

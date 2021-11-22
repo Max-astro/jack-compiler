@@ -170,12 +170,14 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                 self.builder.build_load(ptr, "load_arr_elem")
             }
             Expr::SubroutineCall {
-                class_type, // exist if its a static function
+                class_type, // exist if its a static function or a constructor
                 obj_name,
                 routine_name,
                 args,
             } => {
-                if let Some(fn_name) = self.check_and_get_function(class_type, &routine_name) {
+                if let Some(fn_name) =
+                    self.check_and_get_function(class_type.clone(), &routine_name)
+                {
                     if obj_name.is_some() {
                         panic!("This subroutine should be a static function, can not apply in a object.");
                     }
@@ -187,16 +189,29 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                     self.subroutine_call(fn_name, args_val.as_slice())
                 } else {
                     // process instance's member function
-                    let this_ptr = if let Some(name) = obj_name {
-                        self.get_var_ptr(&name)
+                    let (this_ptr, class_name) = if let Some(name) = obj_name {
+                        let this = self.get_var_ptr(&name);
+                        let ty = this.get_type().get_element_type().into_struct_type();
+                        let class_name = self.get_class_by_type(ty).unwrap();
+
+                        (this, class_name)
                     } else {
-                        self.this_ptr.unwrap()
+                        if let Some(this) = self.this_ptr.clone() {
+                            (this, self.curr_class_name.clone())
+                        } else {
+                            let class_name =
+                                Self::get_class_type_name(class_type.as_ref().unwrap());
+                            (
+                                self.process_constructor(&class_name, &routine_name),
+                                class_name,
+                            )
+                        }
                     };
                     let mut args_val = vec![this_ptr.as_basic_value_enum()];
                     args.into_iter()
                         .for_each(|expr| args_val.push(self.expr_codegen(expr)));
 
-                    let fn_name = format!("class_{}_method_{}", self.curr_class_name, routine_name);
+                    let fn_name = format!("class_{}_method_{}", class_name, routine_name);
                     self.subroutine_call(fn_name, args_val.as_slice())
                 }
             }
@@ -296,6 +311,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                     } => {}
                     _ => panic!("Not a functional call in Do statement"),
                 };
+                println!("DoStmt codegen expr: {:?}", expr);
                 self.expr_codegen(expr);
             }
             Stmt::ReturnStmt(ret) => {
@@ -339,10 +355,10 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         let entry = self.context.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(entry);
 
-        let entry = self
-            .context
-            .append_basic_block(fn_val, &subroutine.routine_name);
-        self.builder.position_at_end(entry);
+        // let entry = self
+        //     .context
+        //     .append_basic_block(fn_val, &subroutine.routine_name);
+        // self.builder.position_at_end(entry);
 
         // // TODO: fix the first arg (this ptr) in the arg list.
         // build arg variables ptr into symbel table
@@ -438,6 +454,15 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                 }
             }
         }
+    }
+
+    fn get_class_by_type(&self, ty: StructType<'ctx>) -> Option<String> {
+        for (k, v) in self.type_cache.iter() {
+            if v.clone() == ty.as_basic_type_enum().clone() {
+                return Some(k.clone());
+            }
+        }
+        None
     }
 
     fn create_subroutine_fn_type(
@@ -547,16 +572,25 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         }
     }
 
+    fn get_class_type_name(class_type: &ClassType) -> String {
+        match class_type {
+            ClassType::Class(class_name) => class_name.clone(),
+            _ => panic!("Not a class"),
+        }
+    }
+
+    fn process_constructor(&mut self, class_name: &str, fn_name: &str) -> PointerValue<'ctx> {
+        let fn_name = format!("class_{}_method_{}", class_name, fn_name);
+        let fn_val = self.module.get_function(&fn_name).unwrap();
+        fn_val.get_first_param().unwrap().into_pointer_value()
+    }
+
     fn subroutine_call(
         &mut self,
         fn_name: String,
         args: &[BasicValueEnum<'ctx>],
     ) -> BasicValueEnum<'ctx> {
         if let Some(fn_val) = self.module.get_function(&fn_name) {
-            // println!("debug {}: \n{:?} \n", fn_name, fn_val);
-            // for arg in args {
-            //     println!("{:?} \n", arg);
-            // }
             match self
                 .builder
                 .build_call(fn_val, args, "fncall")
@@ -636,7 +670,9 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
 fn main() {
     let mut class_decls = vec![];
     for class_file in std::env::args().skip(1) {
-        class_decls.push(jack_compiler::parse_class_decl(&class_file));
+        let ast = jack_compiler::parse_class_decl(&class_file);
+        // println!("{:?}\n", ast);
+        class_decls.push(ast);
     }
 
     let context = Context::create();

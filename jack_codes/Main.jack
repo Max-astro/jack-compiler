@@ -1,0 +1,23 @@
+// Simple test 1
+class Main {
+    static boolean test;
+
+
+    function void set(boolean v) {
+        let test = v;
+    }
+
+    function void main() {
+      var int a;
+
+      let a = 1;
+      
+      while (a < 42) { let a = a + 1; }
+
+      do set(true);
+
+      if (test) { let a = 43; }
+
+      return;
+    }
+}

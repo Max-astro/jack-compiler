@@ -1,0 +1,16 @@
+class Square {
+   field int x, y;
+   
+   constructor Square new(int a, int b) {
+      let x = a;
+      let y = b;
+      do move(1,2);
+      return this;
+   }
+
+   method void move(int a, int b) {
+      let x = x + a;
+      let y = y + b;
+      return;
+   }
+}

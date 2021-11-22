@@ -7,7 +7,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassManager;
-use inkwell::types::{BasicType, BasicTypeEnum, PointerType, StructType};
+use inkwell::types::{BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -93,6 +93,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                     .bool_type()
                     .const_int(0, false)
                     .as_basic_value_enum(),
+                TokenType::This => self.this_ptr.unwrap().as_basic_value_enum(),
                 _ => panic!("unexpected token: {:?}", token),
             },
             Expr::Binary { op, left, right } => {
@@ -152,7 +153,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             Expr::StringConst(_) => todo!(),
             Expr::VarName(var_name) => {
                 let ptr = self.get_var_ptr(&var_name);
-                self.builder.build_load(ptr, "load_memb_var")
+                self.builder.build_load(ptr, &var_name)
             }
             Expr::ArrElem(var_name, indexing) => {
                 let offset = self.expr_codegen(indexing);
@@ -174,17 +175,10 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                 routine_name,
                 args,
             } => {
-                if let Some(class) = class_type {
-                    let class_name = match class {
-                        ClassType::Class(class_name) => class_name,
-                        _ => panic!("Not a class"),
-                    };
-
+                if let Some(fn_name) = self.check_and_get_function(class_type, &routine_name) {
                     if obj_name.is_some() {
                         panic!("This subroutine should be a static function, can not apply in a object.");
                     }
-
-                    let fn_name = format!("class_{}_fn_{}", class_name, routine_name);
                     let args_val = args
                         .into_iter()
                         .map(|expr| self.expr_codegen(expr))
@@ -192,6 +186,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
 
                     self.subroutine_call(fn_name, args_val.as_slice())
                 } else {
+                    // process instance's member function
                     let this_ptr = if let Some(name) = obj_name {
                         self.get_var_ptr(&name)
                     } else {
@@ -288,7 +283,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                 for stmt in stmts {
                     self.stmt_codegen(stmt);
                 }
-                self.builder.build_unconditional_branch(loop_bb);
+                self.builder.build_unconditional_branch(cond_bb);
                 self.builder.position_at_end(end_bb);
             }
             Stmt::DoStmt(expr) => {
@@ -340,6 +335,10 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             .unwrap_or_else(|| panic!("subroutine_codegen: Function {} doesn't exist", fn_name));
         self.curr_fn = Some(fn_val);
 
+        // build function entry basic block
+        let entry = self.context.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
         let entry = self
             .context
             .append_basic_block(fn_val, &subroutine.routine_name);
@@ -354,11 +353,10 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             // member function's first arg is 'this' ptr
             let this_val = arg_iter.next().unwrap();
             let this_ty = this_val.get_type();
-            let this_ptr =
-                self.create_entry_block_alloca(this_ty.ptr_type(AddressSpace::Generic), "this_ptr");
+            let this_ptr = self.create_entry_block_alloca(this_ty, "this_ptr");
             self.builder.build_store(this_ptr, this_val);
             self.curr_symbel_tbl.insert("this".to_string(), this_ptr);
-            self.this_ptr.replace(this_ptr);
+            self.this_ptr.replace(this_val.into_pointer_value());
         }
 
         for (idx, arg) in arg_iter.enumerate() {
@@ -367,15 +365,14 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             if self.curr_symbel_tbl.contains_key(arg_name) {
                 panic!("subroutine_codegen: variable {} alreadly exist.", arg_name);
             }
-            let alloca =
-                self.create_entry_block_alloca(ty.ptr_type(AddressSpace::Generic), arg_name);
+            let alloca = self.create_entry_block_alloca(ty, arg_name);
             self.builder.build_store(alloca, arg);
             self.curr_symbel_tbl.insert(arg_name.clone(), alloca);
         }
 
         // process subroutine local variables
         for (class_ty, names) in subroutine.body.var_decl.iter() {
-            let ty = self.convert_type(class_ty).ptr_type(AddressSpace::Generic);
+            let ty = self.convert_type(class_ty);
             for name in names {
                 if self.curr_symbel_tbl.contains_key(name) {
                     panic!("subroutine_codegen: variable {} alreadly exist.", name);
@@ -445,25 +442,21 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
 
     fn create_subroutine_fn_type(
         &mut self,
+        class_name: &str,
         this_type: Option<StructType<'ctx>>,
         subroutine: &SubroutineDec,
     ) -> FunctionValue<'ctx> {
         let fn_name;
         let mut args_ty = vec![];
+        let has_this;
         if let Some(this) = this_type {
             // is member funcion, the first arg will always be 'this' ptr
             args_ty.push(this.ptr_type(AddressSpace::Generic).as_basic_type_enum());
-            fn_name = format!(
-                "class_{}_method_{}",
-                self.curr_class_name.as_str(),
-                subroutine.routine_name
-            );
+            fn_name = format!("class_{}_method_{}", class_name, subroutine.routine_name);
+            has_this = true;
         } else {
-            fn_name = format!(
-                "class_{}_fn_{}",
-                self.curr_class_name.as_str(),
-                subroutine.routine_name
-            );
+            fn_name = format!("class_{}_fn_{}", class_name, subroutine.routine_name);
+            has_this = false;
         }
         subroutine
             .args
@@ -475,7 +468,12 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             ty => self.convert_type(ty).fn_type(args_ty.as_slice(), false),
         };
         let fn_val = self.module.add_function(fn_name.as_str(), fn_type, None);
-        for (idx, arg) in fn_val.get_param_iter().enumerate() {
+
+        let mut iter = fn_val.get_param_iter();
+        if has_this {
+            iter.next().unwrap().set_name("this");
+        }
+        for (idx, arg) in iter.enumerate() {
             let (_, ref name) = subroutine.args[idx];
             arg.set_name(name.as_str());
         }
@@ -512,7 +510,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         new_type
     }
 
-    fn create_entry_block_alloca(&self, ty: PointerType<'ctx>, name: &str) -> PointerValue<'ctx> {
+    fn create_entry_block_alloca(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
         let builder = self.context.create_builder();
         let entry = self
             .curr_fn
@@ -526,12 +524,39 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         builder.build_alloca(ty, name)
     }
 
+    // hack for non class name static function call
+    fn check_and_get_function(
+        &self,
+        class_type: Option<ClassType>,
+        fn_name: &str,
+    ) -> Option<String> {
+        let fn_name = if let Some(class) = class_type {
+            let class_name = match class {
+                ClassType::Class(class_name) => class_name,
+                _ => panic!("Not a class"),
+            };
+            format!("class_{}_fn_{}", class_name, fn_name)
+        } else {
+            // process static function call with implicit "this" Class name
+            format!("class_{}_fn_{}", self.curr_class_name, fn_name)
+        };
+        if let Some(_) = self.module.get_function(&fn_name) {
+            Some(fn_name)
+        } else {
+            None
+        }
+    }
+
     fn subroutine_call(
         &mut self,
         fn_name: String,
         args: &[BasicValueEnum<'ctx>],
     ) -> BasicValueEnum<'ctx> {
         if let Some(fn_val) = self.module.get_function(&fn_name) {
+            // println!("debug {}: \n{:?} \n", fn_name, fn_val);
+            // for arg in args {
+            //     println!("{:?} \n", arg);
+            // }
             match self
                 .builder
                 .build_call(fn_val, args, "fncall")
@@ -539,7 +564,11 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                 .left()
             {
                 Some(value) => value,
-                None => panic!("Invalid call produced."),
+                None => self
+                    .context
+                    .bool_type()
+                    .const_int(0, false)
+                    .as_basic_value_enum(), // hack: return 0 if return type is void
             }
         } else {
             panic!("Function {} not been decleared", fn_name);
@@ -551,6 +580,7 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             let this = self
                 .this_ptr
                 .unwrap_or_else(|| panic!("derefence 'this' ptr in non member function"));
+            // println!("gep debug: {:?}", this);
             self.builder
                 .build_struct_gep(this, memb_idx, "memb_var_ptr")
                 .unwrap()
@@ -576,10 +606,12 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
             // declare static/member functions
             for subroutine in subroutines {
                 match subroutine.routine_type {
-                    RoutineType::Function => self.create_subroutine_fn_type(None, subroutine),
-                    RoutineType::Method => self.create_subroutine_fn_type(Some(cl_ty), subroutine),
+                    RoutineType::Function => self.create_subroutine_fn_type(name, None, subroutine),
+                    RoutineType::Method => {
+                        self.create_subroutine_fn_type(name, Some(cl_ty), subroutine)
+                    }
                     RoutineType::Constructor => {
-                        self.create_subroutine_fn_type(Some(cl_ty), subroutine)
+                        self.create_subroutine_fn_type(name, Some(cl_ty), subroutine)
                     }
                 };
             }
@@ -623,6 +655,7 @@ fn main() {
     ir.module.print_to_stderr();
 }
 
+#[allow(dead_code)]
 fn fpm_add_passes(fpm: &PassManager<FunctionValue>) {
     fpm.add_instruction_combining_pass();
     fpm.add_reassociate_pass();

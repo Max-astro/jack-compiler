@@ -171,8 +171,8 @@ pub BinOp: TokenType = {
     "/" => TokenType::Divide,
     "&" => TokenType::And,
     "|" => TokenType::Or,
-    "<" => TokenType::Gt,
-    ">" => TokenType::Lt,
+    ">" => TokenType::Gt,
+    "<" => TokenType::Lt,
     "=" => TokenType::Equal,
 };
 
@@ -182,7 +182,7 @@ pub UnaryOp: TokenType = {
 };
 
 pub KwConst: TokenType = {
-    "ture"  => TokenType::True,
+    "true"  => TokenType::True,
     "false" => TokenType::False,
     "null"  => TokenType::Null,
     "this"  => TokenType::This,

@@ -221,9 +221,41 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
     pub fn stmt_codegen(&mut self, stmt: Box<Stmt>) {
         match *stmt {
             Stmt::LetVar(var_name, expr) => {
-                let rhs = self.expr_codegen(expr);
-                let ptr = self.get_var_ptr(&var_name);
-                self.builder.build_store(ptr, rhs);
+                match *expr {
+                    Expr::SubroutineCall {
+                        class_type,
+                        mut obj_name,
+                        routine_name,
+                        args,
+                    } => {
+                        // hack for constructor: take lhs var (obj addr) as obj_name
+                        if routine_name.as_str() == "new" {
+                            obj_name = Some(var_name.clone());
+                            let new_expr = Box::new(Expr::SubroutineCall {
+                                class_type,
+                                obj_name,
+                                routine_name,
+                                args,
+                            });
+                            self.expr_codegen(new_expr);
+                        } else {
+                            let expr = Box::new(Expr::SubroutineCall {
+                                class_type,
+                                obj_name,
+                                routine_name,
+                                args,
+                            });
+                            let rhs = self.expr_codegen(expr);
+                            let ptr = self.get_var_ptr(&var_name);
+                            self.builder.build_store(ptr, rhs);
+                        }
+                    }
+                    _ => {
+                        let rhs = self.expr_codegen(expr);
+                        let ptr = self.get_var_ptr(&var_name);
+                        self.builder.build_store(ptr, rhs);
+                    }
+                };
             }
             Stmt::LetArr {
                 arr_name,

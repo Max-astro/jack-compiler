@@ -8,9 +8,21 @@ class Square {
       return this;
    }
 
+   function int const() {
+      return 99;
+   }
+
    method void move(int a, int b) {
       let x = x + a;
       let y = y + b;
       return;
+   }
+
+   method int x() {
+      return x;
+   }
+
+   method int y() {
+      return y;
    }
 }

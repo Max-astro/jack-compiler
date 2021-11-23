@@ -270,13 +270,13 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                 self.builder.build_unconditional_branch(end_block);
 
                 // else block
+                self.builder.position_at_end(else_block);
                 if let Some(stmts) = alternative {
-                    self.builder.position_at_end(else_block);
                     for stmt in stmts {
                         self.stmt_codegen(stmt);
                     }
-                    self.builder.build_unconditional_branch(end_block);
                 }
+                self.builder.build_unconditional_branch(end_block);
 
                 // merge block
                 self.builder.position_at_end(end_block);
@@ -287,6 +287,8 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
                 let cond_bb = self.context.append_basic_block(parent, "cond");
                 let loop_bb = self.context.append_basic_block(parent, "loop_body");
                 let end_bb = self.context.append_basic_block(parent, "end");
+
+                self.builder.build_unconditional_branch(cond_bb);
 
                 self.builder.position_at_end(cond_bb);
                 let comparison = self.expr_codegen(cond);
@@ -355,12 +357,6 @@ impl<'a, 'ctx> IRCompiler<'a, 'ctx> {
         let entry = self.context.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(entry);
 
-        // let entry = self
-        //     .context
-        //     .append_basic_block(fn_val, &subroutine.routine_name);
-        // self.builder.position_at_end(entry);
-
-        // // TODO: fix the first arg (this ptr) in the arg list.
         // build arg variables ptr into symbel table
         let mut arg_iter = fn_val.get_param_iter();
         if is_fn {
@@ -679,7 +675,7 @@ fn main() {
     let module = context.create_module("jack");
     let builder = context.create_builder();
     let fpm = PassManager::create(&module);
-    // fpm_add_passes(&fpm);    // show not optimized IR for debug
+    // fpm_add_passes(&fpm); // show not optimized IR for debug
     fpm.initialize();
 
     let mut ir = IRCompiler::new(&context, &builder, &fpm, &module);
@@ -689,6 +685,21 @@ fn main() {
     }
 
     ir.module.print_to_stderr();
+    println!("\nJIT execution\n");
+    let ee = module
+        .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+        .unwrap();
+    let main_func =
+        unsafe { ee.get_function::<unsafe extern "C" fn() -> i32>("class_Main_fn_main") };
+    let compiled_fn = match main_func {
+        Ok(f) => f,
+        Err(err) => panic!("!> Error during execution: {:?}", err),
+    };
+
+    unsafe {
+        // compiled_fn.call();
+        println!("=> {}", compiled_fn.call());
+    }
 }
 
 #[allow(dead_code)]

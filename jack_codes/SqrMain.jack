@@ -1,12 +1,18 @@
-// Simple test 1
+// Simple test 2
 class Main {
-    function void main() {
+    function int main() {
+      var int a;
       var Square sq;
 
       let sq = Square.new(1,1);
       
-      do sq.move(1,2);
+      //do sq.move(1,2);
 
-      return;
+      //let a = Square.const();
+      //let a = sq.x();
+      //let b = sq.y;
+      //let c = a + b;
+
+      return a;
     }
 }

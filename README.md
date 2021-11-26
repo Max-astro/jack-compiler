@@ -1,6 +1,5 @@
-# A jack-compiler written in Rust
+# Compile jack-lang to llvm-ir
+Jack compiler is a project from "The Elements of Computing Systems" Chapter 10/11. (ref: https://www.nand2tetris.org/)
 
-Done nand2tetris project 10 (Compiler front end)
-
-PS. The llvm-ir branch is an experimental job, I'm trying to compile jack language into llvm IR use Inkwells API. 
-(Ref: https://github.com/TheDan64/inkwell)
+This branch is an experimental job, I'm trying to compile jack programming language into llvm IR use Inkwells API. 
+(Inkwells ref: https://github.com/TheDan64/inkwell)
